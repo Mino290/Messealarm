@@ -2,17 +2,24 @@ import os
 import re
 import time
 import requests
+import smtplib
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime, timezone
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # ====== Konfiguration ======
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://bunrrjnxcdsstpkvldhj.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ1bnJyam54Y2Rzc3Rwa3ZsZGhqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NDA1Nzc1NiwiZXhwIjoyMDY5NjMzNzU2fQ.Y-lCtfIIEal5MVRtCe5ZWke_RqR3X40M2vMQVvTP3Dc")
+SUPABASE_URL = "https://bunrrjnxcdsstpkvldhj.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ1bnJyam54Y2Rzc3Rwa3ZsZGhqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NDA1Nzc1NiwiZXhwIjoyMDY5NjMzNzU2fQ.Y-lCtfIIEal5MVRtCe5ZWke_RqR3X40M2vMQVvTP3Dc"
+
+# Hier SMTP-Daten direkt eintragen
+SMTP_USER = "messen.infos@gmail.com"
+SMTP_PASS = "gzao nytx exxb hczk"  # App-spezifisches Passwort
 
 AUMA_API_URL = "https://www.auma.de/api/TradeFairData/getWebOverviewTradeFairData"
 DETAIL_URL_FMT = "https://www.auma.de/messen-finden/details/?tfd={url_param}"
 
-# Filter: Deutschland, alle Monate, mehrere Jahre (anpassbar)
+# Filter: Deutschland, alle Monate, mehrere Jahre
 FILTERS = {
     "intFilterYearFrom": 2025,
     "intFilterYearTo": 2032,
@@ -25,37 +32,28 @@ FILTERS = {
 
 # ====== Hilfsfunktionen ======
 def tz_now_iso() -> str:
-    """UTC-zeitbewusster ISO-String."""
     return datetime.now(timezone.utc).isoformat()
 
 def parse_datum(date_string):
     if not date_string:
         return None, None
-
-    # Ersetze Sonderzeichen
     date_string = date_string.replace("–", "-").replace("bis", "-")
-    
-    # Suche nach zwei Datumsangaben
     match = re.findall(r"\d{1,2}\.\d{1,2}\.\d{4}", date_string)
     if len(match) == 2:
         start = datetime.strptime(match[0], "%d.%m.%Y").date()
         end = datetime.strptime(match[1], "%d.%m.%Y").date()
         return start.isoformat(), end.isoformat()
-    
-    # Wenn nur ein Datum gefunden wird
     if len(match) == 1:
         start = datetime.strptime(match[0], "%d.%m.%Y").date()
         return start.isoformat(), start.isoformat()
-    
     return None, None
 
 def normalize_city(s: Optional[str]) -> Optional[str]:
-    """Kleinschreibung, Whitespace trimmen – robustere Stadtvergleiche."""
     if s is None:
         return None
     return re.sub(r"\s+", " ", s).strip().lower()
 
-# ====== 1) AUMA: alle deutschen Messen holen (paginiert), aber nur zurückgeben (kein DB-Write) ======
+# ====== AUMA Scraping ======
 def fetch_auma_messen_de() -> List[Dict[str, Any]]:
     headers = {"Accept": "application/json"}
     seite = 1
@@ -101,11 +99,11 @@ def fetch_auma_messen_de() -> List[Dict[str, Any]]:
             })
 
         seite += 1
-        time.sleep(0.2)  # sanft drosseln
+        time.sleep(0.2)
 
     return result
 
-# ====== 2) Supabase: bestehende Messen & Abonnenten laden ======
+# ====== Supabase Funktionen ======
 def supabase_headers() -> Dict[str, str]:
     return {
         "apikey": SUPABASE_KEY,
@@ -121,18 +119,12 @@ def fetch_db_messen() -> List[Dict[str, Any]]:
     return r.json()
 
 def fetch_abonnenten() -> List[Dict[str, Any]]:
-    """
-    Erwartet Tabelle 'Abonnenten' mit mind.:
-      - name (text)
-      - email (text)
-      - staedte (text[] ODER text, z. B. 'Berlin,Hamburg')
-    """
     url = f"{SUPABASE_URL}/rest/v1/Abonnenten?select=*"
     r = requests.get(url, headers=supabase_headers(), timeout=60)
     r.raise_for_status()
     return r.json()
 
-# ====== 3) Vergleich: Änderungen feststellen ======
+# ====== Vergleichslogik ======
 def index_by_id(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return {row["id"]: row for row in rows if "id" in row}
 
@@ -140,13 +132,6 @@ def dates_equal(a: Optional[str], b: Optional[str]) -> bool:
     return (a or "") == (b or "")
 
 def diff_messen(api_rows: List[Dict[str, Any]], db_index: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Liefert eine Liste von Änderungen mit strukturierter Info:
-    - type: 'new' | 'date_added' | 'date_changed'
-    - messe: aktueller API-Datensatz (bereits normalisiert)
-    - before: vorheriger DB-Status (nur für Änderungen vorhanden)
-    - changed_fields: Dict der geänderten Datumsfelder (für Updates)
-    """
     changes: List[Dict[str, Any]] = []
 
     for cur in api_rows:
@@ -154,7 +139,6 @@ def diff_messen(api_rows: List[Dict[str, Any]], db_index: Dict[str, Dict[str, An
         prev = db_index.get(mid)
 
         if prev is None:
-            # komplett neu
             changes.append({
                 "type": "new",
                 "messe": cur,
@@ -168,7 +152,6 @@ def diff_messen(api_rows: List[Dict[str, Any]], db_index: Dict[str, Dict[str, An
         cur_start = cur.get("start_datum")
         cur_end = cur.get("end_datum")
 
-        # "Datum neu hinzugefügt": vorher fehlend (None/""), jetzt vorhanden
         date_added = False
         changed_fields = {}
 
@@ -188,7 +171,6 @@ def diff_messen(api_rows: List[Dict[str, Any]], db_index: Dict[str, Dict[str, An
             })
             continue
 
-        # "Datum geändert": vorher != jetzt (und beide Werte existent oder einer wurde geändert)
         date_changed = False
         if (cur_start is not None and not dates_equal(prev_start, cur_start)):
             date_changed = True
@@ -207,9 +189,8 @@ def diff_messen(api_rows: List[Dict[str, Any]], db_index: Dict[str, Dict[str, An
 
     return changes
 
-# ====== 4) DB-Updates anwenden ======
+# ====== DB Updates ======
 def upsert_new_messen(new_items: List[Dict[str, Any]]) -> None:
-    """Neue Messen in einem Schwung hochladen."""
     if not new_items:
         return
     url = f"{SUPABASE_URL}/rest/v1/Messen"
@@ -223,7 +204,6 @@ def upsert_new_messen(new_items: List[Dict[str, Any]]) -> None:
         raise RuntimeError(f"Upsert new failed: {r.status_code} {r.text}")
 
 def patch_messe_dates(messe_id: str, changed_fields: Dict[str, Any]) -> None:
-    """Nur geänderte Datumsfelder patchen (plus ggf. URL/Param)."""
     if not changed_fields:
         return
     url = f"{SUPABASE_URL}/rest/v1/Messen?id=eq.{messe_id}"
@@ -235,34 +215,27 @@ def apply_changes_to_db(changes: List[Dict[str, Any]]) -> None:
     new_items = [c["messe"] for c in changes if c["type"] == "new"]
     updates = [c for c in changes if c["type"] in ("date_added", "date_changed")]
 
-    # Neue Messen in Batches hochladen (z. B. 500er Batches)
     BATCH = 500
     for i in range(0, len(new_items), BATCH):
         upsert_new_messen(new_items[i:i+BATCH])
         time.sleep(0.2)
 
-    # Updates patchen
     for upd in updates:
         mid = upd["messe"]["id"]
-        # Stelle sicher, dass URL/Param/Kategorie/Ort mitgepflegt werden (falls die API das zwischenzeitlich korrigiert hat)
-        base_fields = {
+        payload = {
             "titel": upd["messe"].get("titel"),
             "stadt": upd["messe"].get("stadt"),
             "land": upd["messe"].get("land"),
             "url_param": upd["messe"].get("url_param"),
             "url": upd["messe"].get("url"),
             "kategorie": upd["messe"].get("kategorie"),
+            **upd["changed_fields"]
         }
-        payload = {**base_fields, **upd["changed_fields"]}
         patch_messe_dates(mid, payload)
         time.sleep(0.1)
 
-# ====== 5) Abonnenten-Verknüpfung & Benachrichtigungs-Liste ======
+# ====== Benachrichtigungslogik ======
 def parse_abonnent_staedt(eintrag: Dict[str, Any]) -> List[str]:
-    """
-    Akzeptiert sowohl text[] (bereits Liste) als auch CSV-Text.
-    Normalisiert auf lowercase.
-    """
     if "staedte" in eintrag:
         v = eintrag["staedte"]
     elif "staedte_csv" in eintrag:
@@ -274,77 +247,65 @@ def parse_abonnent_staedt(eintrag: Dict[str, Any]) -> List[str]:
 
     if v is None:
         return []
-
     if isinstance(v, list):
         return [normalize_city(x) for x in v if isinstance(x, str)]
-
     if isinstance(v, str):
         parts = [p.strip() for p in v.replace(";", ",").split(",") if p.strip()]
         return [normalize_city(p) for p in parts]
-
     return []
 
-def build_notifications(changes: List[Dict[str, Any]], abonnenten: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    
-    # Vorindexierung: city -> Änderungen
+def build_notifications(changes: List[Dict[str, Any]], abonnenten: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    notifications = []
     city_map: Dict[str, List[Dict[str, Any]]] = {}
+    
     for c in changes:
         city = normalize_city(c["messe"].get("stadt"))
-        if not city:
-            continue
-        city_map.setdefault(city, []).append(c)
+        if city:
+            city_map.setdefault(city, []).append(c)
 
-    # Abonnenten matchen
-    out: Dict[str, List[Dict[str, Any]]] = {}
     for ab in abonnenten:
         email = ab.get("email")
-        if not email:
+        name = ab.get("name")
+        if not email or not name:
             continue
+            
         cities = parse_abonnent_staedt(ab)
         if not cities:
             continue
 
-        bucket: List[Dict[str, Any]] = []
+        abo_changes = []
         for city in cities:
-            bucket.extend(city_map.get(city, []))
+            abo_changes.extend(city_map.get(city, []))
 
-        # Duplikate (gleiche Messe mehrfach wegen mehrerer Städte) filtern
         seen = set()
-        uniq_bucket = []
-        for item in bucket:
+        unique_changes = []
+        for item in abo_changes:
             mid = item["messe"]["id"]
-            if mid in seen:
-                continue
-            seen.add(mid)
-            uniq_bucket.append(item)
+            if mid not in seen:
+                seen.add(mid)
+                unique_changes.append(item)
 
-        if uniq_bucket:
-            out[email] = uniq_bucket
+        if unique_changes:
+            notifications.append({
+                "abonnent": {
+                    "email": email,
+                    "name": name,
+                    "cities": cities
+                },
+                "changes": unique_changes
+            })
 
-    return out
+    return notifications
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-SMTP_USER = "messen.infos@gmail.com"
-SMTP_PASS = "gzao nytx exxb hczk"
-
-# E-Mail Vorlage als HTML (leicht anpassbar)
-EMAIL_SUBJECT_TEMPLATE = "Neuer Termin - {titel} {start_datum} - {end_datum}"
-
-EMAIL_BODY_TEMPLATE = """
+# ====== E-Mail Templates ======
+EMAIL_TEMPLATE = """
 <html>
 <body>
 <p>Hallo {name},</p>
 
-<p>Es gibt einen neuen Termin in {stadt}:</p>
+<p>Es gibt Neuigkeiten für Ihre abonnierten Städte {cities}:</p>
 
-<p><b>{titel}</b><br>
-{start_datum} - {end_datum}<br>
-{stadt}, {land}</p>
-
-<p><a href="{url}" target="_blank">Mehr Infos zu dieser Messe</a></p>
+{events}
 
 <p>Viele Grüße<br>
 Mino</p>
@@ -352,8 +313,26 @@ Mino</p>
 </html>
 """
 
-def send_notifications(notify_map: Dict[str, List[Dict[str, Any]]]) -> None:
-    """Versendet Benachrichtigungs-Mails über Gmail SMTP im HTML-Format."""
+EVENT_TEMPLATE = """
+<div style="margin-bottom: 20px; border-left: 3px solid #4CAF50; padding-left: 10px;">
+    <h3 style="margin-top: 0; margin-bottom: 5px; color: #2c3e50;">{titel}</h3>
+    <p style="margin: 5px 0; color: #7f8c8d;">
+        <span style="color: #3498db;">{change_type}</span> | 
+        <b>Termin:</b> {start_datum} - {end_datum}<br>
+        <b>Ort:</b> {stadt}, {land}<br>
+        <a href="{url}" target="_blank" style="color: #2980b9; text-decoration: none;">› Mehr Infos zu dieser Messe</a>
+    </p>
+</div>
+"""
+
+# ====== E-Mail Versand ======
+def send_notifications(notifications: List[Dict[str, Any]]) -> None:
+    type_translation = {
+        "new": "Neue Messe",
+        "date_added": "Termin hinzugefügt",
+        "date_changed": "Termin aktualisiert"
+    }
+    
     smtp_server = "smtp.gmail.com"
     smtp_port = 587
 
@@ -361,77 +340,83 @@ def send_notifications(notify_map: Dict[str, List[Dict[str, Any]]]) -> None:
         server.starttls()
         server.login(SMTP_USER, SMTP_PASS)
 
-        for email, items in notify_map.items():
-            for it in items:
-                messe = it["messe"]
-
-                # Hier Name aus Abonnenten holen — falls in notify_map nur email+änderungen steht, muss vorher Mapping existieren
-                # Beispiel: Name aus 'Abonnenten'-Abfrage mitgegeben
-                name = messe.get("abon_name", "Abonnent")
-
-                # Platzhalter füllen
-                subject = EMAIL_SUBJECT_TEMPLATE.format(
-                    titel=messe["titel"],
-                    start_datum=messe.get("start_datum") or "",
-                    end_datum=messe.get("end_datum") or ""
+        for notification in notifications:
+            ab = notification["abonnent"]
+            changes = notification["changes"]
+            
+            event_html = ""
+            for change in changes:
+                m = change["messe"]
+                event_html += EVENT_TEMPLATE.format(
+                    titel=m["titel"],
+                    change_type=type_translation.get(change["type"], "Update"),
+                    start_datum=m.get("start_datum") or "unbekannt",
+                    end_datum=m.get("end_datum") or "unbekannt",
+                    stadt=m.get("stadt") or "unbekannt",
+                    land=m.get("land") or "unbekannt",
+                    url=m.get("url") or "#"
                 )
+            
+            cities_str = ", ".join([c.capitalize() for c in ab["cities"]])
+            
+            body_html = EMAIL_TEMPLATE.format(
+                name=ab["name"],
+                cities=cities_str,
+                events=event_html
+            )
 
-                body_html = EMAIL_BODY_TEMPLATE.format(
-                    name=name,
-                    titel=messe["titel"],
-                    start_datum=messe.get("start_datum") or "",
-                    end_datum=messe.get("end_datum") or "",
-                    stadt=messe.get("stadt") or "",
-                    land=messe.get("land") or "",
-                    url=messe.get("url") or "#"
-                )
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"Neue Messen in {cities_str}"
+            msg["From"] = SMTP_USER
+            msg["To"] = ab["email"]
+            msg.attach(MIMEText(body_html, "html"))
 
-                # E-Mail bauen
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = subject
-                msg["From"] = SMTP_USER
-                msg["To"] = email
+            try:
+                server.sendmail(SMTP_USER, ab["email"], msg.as_string())
+                print(f"✓ Benachrichtigung an {ab['email']} gesendet")
+            except Exception as e:
+                print(f"✗ Fehler beim Senden an {ab['email']}: {e}")
+                # Optional: Fehler protokollieren
 
-                msg.attach(MIMEText(body_html, "html"))
-
-                # Senden
-                try:
-                    server.sendmail(SMTP_USER, email, msg.as_string())
-                    print(f"Benachrichtigung an {email} gesendet: {subject}")
-                except Exception as e:
-                    print(f"Fehler beim Senden an {email}: {e}")
-# ====== Main-Flow ======
+# ====== Hauptprogramm ======
 def main():
-    # 1) Frische API-Daten
-    api_rows = fetch_auma_messen_de()
-    print(f"AUMA: {len(api_rows)} Messen geladen.")
-
-    # 2) Bestehende DB-Daten
-    db_rows = fetch_db_messen()
-    db_index = index_by_id(db_rows)
-    print(f"DB: {len(db_rows)} Messen vorhanden.")
-
-    # 3) Änderungen ermitteln
-    changes = diff_messen(api_rows, db_index)
-    print(f"Änderungen: {len(changes)}")
-
-    if not changes:
-        print("Keine relevanten Änderungen. Ende.")
-        return
-
-    # 4) Änderungen in DB anwenden
-    apply_changes_to_db(changes)
-    print("DB aktualisiert.")
-
-    # 5) Abonnenten laden & Benachrichtigungen bauen
-    abonnenten = fetch_abonnenten()
-    notify_map = build_notifications(changes, abonnenten)
-
-    # 6) Mails senden (hier: Demo)
-    if notify_map:
-        send_notifications(notify_map)
-    else:
-        print("Keine Benachrichtigungen nötig (keine passenden Städte).")
+    try:
+        print("Starte Messen-Scraping...")
+        api_rows = fetch_auma_messen_de()
+        print(f"AUMA: {len(api_rows)} Messen geladen.")
+        
+        print("Lade Datenbank-Messen...")
+        db_rows = fetch_db_messen()
+        db_index = index_by_id(db_rows)
+        print(f"DB: {len(db_rows)} Messen vorhanden.")
+        
+        changes = diff_messen(api_rows, db_index)
+        print(f"Änderungen: {len(changes)}")
+        
+        if not changes:
+            print("Keine relevanten Änderungen. Ende.")
+            return
+        
+        print("Aktualisiere Datenbank...")
+        apply_changes_to_db(changes)
+        print("✓ DB aktualisiert.")
+        
+        print("Lade Abonnenten...")
+        abonnenten = fetch_abonnenten()
+        print(f"{len(abonnenten)} Abonnenten gefunden.")
+        
+        notifications = build_notifications(changes, abonnenten)
+        
+        if notifications:
+            print(f"Sende {len(notifications)} Benachrichtigungen...")
+            send_notifications(notifications)
+            print("✓ Alle Benachrichtigungen gesendet")
+        else:
+            print("Keine Benachrichtigungen nötig")
+            
+    except Exception as e:
+        print(f"✗ Kritischer Fehler: {str(e)}")
+        # Optional: Fehler an Admin senden
 
 if __name__ == "__main__":
-    main()
+  main()
