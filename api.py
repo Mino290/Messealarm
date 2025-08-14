@@ -285,10 +285,7 @@ def parse_abonnent_staedt(eintrag: Dict[str, Any]) -> List[str]:
     return []
 
 def build_notifications(changes: List[Dict[str, Any]], abonnenten: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Liefert Dict: {email: [änderung, ...]} mit Änderungen,
-    gefiltert nach Städten, die der/die Abonnent:in gewählt hat.
-    """
+    
     # Vorindexierung: city -> Änderungen
     city_map: Dict[str, List[Dict[str, Any]]] = {}
     for c in changes:
@@ -326,19 +323,83 @@ def build_notifications(changes: List[Dict[str, Any]], abonnenten: List[Dict[str
 
     return out
 
-# ====== 6) (Optional) E-Mail-Versand – hier nur Platzhalter/Print ======
-def send_notifications(notify_map: Dict[str, List[Dict[str, Any]]]) -> None:
-    """
-    Hier nur Demo: Ausgabe auf Konsole.
-    Ersetze durch SMTP/SendGrid-Implementierung.
-    """
-    for email, items in notify_map.items():
-        print(f"\n--- Mail an: {email} ---")
-        for it in items:
-            t = it["type"]
-            m = it["messe"]
-            print(f"[{t}] {m['titel']} | {m.get('stadt')} | {m.get('start_datum')}–{m.get('end_datum')} | {m.get('url')}")
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
+SMTP_USER = "messen.infos@gmail.com"
+SMTP_PASS = "gzao nytx exxb hczk"
+
+# E-Mail Vorlage als HTML (leicht anpassbar)
+EMAIL_SUBJECT_TEMPLATE = "Neuer Termin - {titel} {start_datum} - {end_datum}"
+
+EMAIL_BODY_TEMPLATE = """
+<html>
+<body>
+<p>Hallo {name},</p>
+
+<p>Es gibt einen neuen Termin in {stadt}:</p>
+
+<p><b>{titel}</b><br>
+{start_datum} - {end_datum}<br>
+{stadt}, {land}</p>
+
+<p><a href="{url}" target="_blank">Mehr Infos zu dieser Messe</a></p>
+
+<p>Viele Grüße<br>
+Mino</p>
+</body>
+</html>
+"""
+
+def send_notifications(notify_map: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Versendet Benachrichtigungs-Mails über Gmail SMTP im HTML-Format."""
+    smtp_server = "smtp.gmail.com"
+    smtp_port = 587
+
+    with smtplib.SMTP(smtp_server, smtp_port) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+
+        for email, items in notify_map.items():
+            for it in items:
+                messe = it["messe"]
+
+                # Hier Name aus Abonnenten holen — falls in notify_map nur email+änderungen steht, muss vorher Mapping existieren
+                # Beispiel: Name aus 'Abonnenten'-Abfrage mitgegeben
+                name = messe.get("abon_name", "Abonnent")
+
+                # Platzhalter füllen
+                subject = EMAIL_SUBJECT_TEMPLATE.format(
+                    titel=messe["titel"],
+                    start_datum=messe.get("start_datum") or "",
+                    end_datum=messe.get("end_datum") or ""
+                )
+
+                body_html = EMAIL_BODY_TEMPLATE.format(
+                    name=name,
+                    titel=messe["titel"],
+                    start_datum=messe.get("start_datum") or "",
+                    end_datum=messe.get("end_datum") or "",
+                    stadt=messe.get("stadt") or "",
+                    land=messe.get("land") or "",
+                    url=messe.get("url") or "#"
+                )
+
+                # E-Mail bauen
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = SMTP_USER
+                msg["To"] = email
+
+                msg.attach(MIMEText(body_html, "html"))
+
+                # Senden
+                try:
+                    server.sendmail(SMTP_USER, email, msg.as_string())
+                    print(f"Benachrichtigung an {email} gesendet: {subject}")
+                except Exception as e:
+                    print(f"Fehler beim Senden an {email}: {e}")
 # ====== Main-Flow ======
 def main():
     # 1) Frische API-Daten
