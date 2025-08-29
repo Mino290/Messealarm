@@ -4,7 +4,7 @@ import time
 import requests
 import smtplib
 from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -34,18 +34,36 @@ FILTERS = {
 def tz_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def parse_datum(date_string):
+def parse_datum(date_string: str):
     if not date_string:
         return None, None
-    date_string = date_string.replace("–", "-").replace("bis", "-")
-    match = re.findall(r"\d{1,2}\.\d{1,2}\.\d{4}", date_string)
-    if len(match) == 2:
-        start = datetime.strptime(match[0], "%d.%m.%Y").date()
-        end = datetime.strptime(match[1], "%d.%m.%Y").date()
-        return start.isoformat(), end.isoformat()
-    if len(match) == 1:
-        start = datetime.strptime(match[0], "%d.%m.%Y").date()
-        return start.isoformat(), start.isoformat()
+
+    try:
+        # Entferne "verschoben", "voraussichtlich" etc.
+        clean = re.sub(r"(verschoben.*|voraussichtlich.*)", "", date_string, flags=re.IGNORECASE).strip()
+
+        # Erkenne Formate wie 22.09.-25.09.2026
+        range_match = re.match(r"(\d{1,2})\.(\d{1,2})\.-(\d{1,2})\.(\d{1,2})\.(\d{4})", clean)
+        if range_match:
+            start_day, start_month, end_day, end_month, year = map(int, range_match.groups())
+            start = datetime(year, start_month, start_day).date()
+            end = datetime(year, end_month, end_day).date()
+            return start.isoformat(), end.isoformat()
+
+        # Normales Range-Format mit Jahren: 08.11.2025 - 12.11.2025
+        matches = re.findall(r"\d{1,2}\.\d{1,2}\.\d{4}", clean)
+        dates = [datetime.strptime(d, "%d.%m.%Y").date() for d in matches]
+
+        if len(dates) >= 2:
+            start, end = sorted(dates)
+            return start.isoformat(), end.isoformat()
+        elif len(dates) == 1:
+            # Eintägige Messe
+            return dates[0].isoformat(), dates[0].isoformat()
+
+    except Exception as e:
+        print(f"✗ Fehler beim Parsen von '{date_string}': {e}")
+
     return None, None
 
 def normalize_city(s: Optional[str]) -> Optional[str]:
