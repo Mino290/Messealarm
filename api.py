@@ -252,6 +252,22 @@ def apply_changes_to_db(changes: List[Dict[str, Any]]) -> None:
         patch_messe_dates(mid, payload)
         time.sleep(0.1)
 
+def delete_old_messen(ids: List[str]) -> None:
+    """Löscht Messen aus der DB, die nicht mehr in der API erscheinen."""
+    if not ids:
+        return
+
+    BATCH = 500
+    for i in range(0, len(ids), BATCH):
+        batch_ids = ids[i:i + BATCH]
+        id_list = ",".join([f"'{mid}'" for mid in batch_ids])
+        url = f"{SUPABASE_URL}/rest/v1/Messen?id=in.({id_list})"
+        r = requests.delete(url, headers=supabase_headers(), timeout=60)
+        if r.status_code not in (200, 204):
+            raise RuntimeError(f"Löschen fehlgeschlagen: {r.status_code} {r.text}")
+        print(f"✓ {len(batch_ids)} alte Messen gelöscht")
+        time.sleep(0.2)
+
 # ====== Benachrichtigungslogik ======
 def parse_abonnent_staedt(eintrag: Dict[str, Any]) -> List[str]:
     if "staedte" in eintrag:
@@ -348,7 +364,8 @@ def send_notifications(notifications: List[Dict[str, Any]]) -> None:
     type_translation = {
         "new": "Neue Messe",
         "date_added": "Termin hinzugefügt",
-        "date_changed": "Termin aktualisiert"
+        "date_changed": "Termin aktualisiert",
+        "deleted": "Termin abgesagt"
     }
     
     smtp_server = "smtp.gmail.com"
@@ -391,15 +408,15 @@ def send_notifications(notifications: List[Dict[str, Any]]) -> None:
 
             try:
                 server.sendmail(SMTP_USER, ab["email"], msg.as_string())
-                print(f"✓ Benachrichtigung an {ab['email']} gesendet")
+                print(f"Benachrichtigung an {ab['email']} gesendet")
             except Exception as e:
-                print(f"✗ Fehler beim Senden an {ab['email']}: {e}")
+                print(f"Fehler beim Senden an {ab['email']}: {e}")
                 # Optional: Fehler protokollieren
 
 # ====== Hauptprogramm ======
 def main():
     try:
-        print("Starte Messen-Scraping...")
+        print("Starte Messelauf...")
         api_rows = fetch_auma_messen_de()
         print(f"AUMA: {len(api_rows)} Messen geladen.")
         
@@ -408,32 +425,54 @@ def main():
         db_index = index_by_id(db_rows)
         print(f"DB: {len(db_rows)} Messen vorhanden.")
         
+        print("Prüfe auf veraltete Messen...")
+        api_ids = {m["id"] for m in api_rows}
+        obsolete_ids = sorted(set(db_index.keys()) - api_ids)
+        print(f"{len(obsolete_ids)} veraltete Messen gefunden.")
+
+        deleted_changes = []
+        if obsolete_ids:
+            for mid in obsolete_ids:
+                deleted_changes.append({
+                    "type": "deleted",
+                    "messe": db_index[mid],   # Speichere gelöschte Messe-Daten
+                    "before": db_index[mid],
+                    "changed_fields": {}
+                })
+            delete_old_messen(obsolete_ids)
+        else:
+            print("Keine veralteten Messen gefunden.")
+
+        # Normale Änderungen ermitteln
         changes = diff_messen(api_rows, db_index)
-        print(f"Änderungen: {len(changes)}")
+
+        # Kombinieren: normale Änderungen + gelöschte
+        all_changes = changes + deleted_changes
+        print(f"Änderungen: {len(all_changes)}")
         
-        if not changes:
-            print("Keine relevanten Änderungen. Ende.")
+        if not all_changes:
+            print("Keine Änderungen gefunden.")
             return
         
-        print("Aktualisiere Datenbank...")
-        apply_changes_to_db(changes)
-        print("✓ DB aktualisiert.")
+        print("Aktualisiere Datenbank.")
+        apply_changes_to_db([c for c in all_changes if c["type"] != "deleted"])
+        print("DB aktualisiert.")
         
         print("Lade Abonnenten...")
         abonnenten = fetch_abonnenten()
         print(f"{len(abonnenten)} Abonnenten gefunden.")
         
-        notifications = build_notifications(changes, abonnenten)
+        notifications = build_notifications(all_changes, abonnenten)
         
         if notifications:
             print(f"Sende {len(notifications)} Benachrichtigungen...")
             send_notifications(notifications)
-            print("✓ Alle Benachrichtigungen gesendet")
+            print("Alle Benachrichtigungen gesendet")
         else:
             print("Keine Benachrichtigungen nötig")
             
     except Exception as e:
-        print(f"✗ Kritischer Fehler: {str(e)}")
+        print(f"Kritischer Fehler: {str(e)}")
         # Optional: Fehler an Admin senden
 
 if __name__ == "__main__":
