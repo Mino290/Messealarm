@@ -2,7 +2,7 @@ name: AUMA Messe Notifier
 
 on:
   schedule:
-    - cron: "0 7 * * *"   # Jeden Tag um 07:00 Uhr UTC
+    - cron: "0 7 * * *"   # Jeden Tag um 06:00 Uhr UTC
   workflow_dispatch:       # Manueller Start möglich
 
 jobs:
