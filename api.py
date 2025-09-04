@@ -334,28 +334,49 @@ def build_notifications(changes: List[Dict[str, Any]], abonnenten: List[Dict[str
 # ====== E-Mail Templates ======
 EMAIL_TEMPLATE = """
 <html>
-<body>
-<p>Hallo {name},</p>
-
-<p>Es gibt Neuigkeiten für Ihre abonnierten Städte {cities}:</p>
-
-{events}
-
-<p>Viele Grüße<br>
-Mino</p>
-</body>
+  <body style="margin:0; padding:0; font-family: Arial, sans-serif; background-color:#f7f7f7;">
+    <table role="presentation" style="width:100%; border-collapse:collapse; padding:20px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" style="width:600px; background:#ffffff; border-radius:12px; padding:30px; text-align:left; box-shadow:0 2px 6px rgba(0,0,0,0.05);">
+            <tr>
+              <td>
+                <h2 style="margin:0 0 20px 0; font-size:20px; color:#2c3e50; font-weight:600;">
+                  Hallo {name},
+                </h2>
+                <p style="margin:0 0 20px 0; font-size:14px; color:#444;">
+                  Es gibt Neuigkeiten für Ihre abonnierten Städte <b>{cities}</b>:
+                </p>
+                {events}
+                <p style="margin-top:30px; font-size:13px; color:#777;">
+                  Viele Grüße<br>
+                  <b>Mino</b>
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
 </html>
 """
 
 EVENT_TEMPLATE = """
-<div style="margin-bottom: 20px; border-left: 3px solid #4CAF50; padding-left: 10px;">
-    <h3 style="margin-top: 0; margin-bottom: 5px; color: #2c3e50;">{titel}</h3>
-    <p style="margin: 5px 0; color: #7f8c8d;">
-        <span style="color: #3498db;">{change_type}</span> | 
-        <b>Termin:</b> {start_datum} - {end_datum}<br>
-        <b>Ort:</b> {stadt}, {land}<br>
-        <a href="{url}" target="_blank" style="color: #2980b9; text-decoration: none;">› Mehr Infos zu dieser Messe</a>
-    </p>
+<div style="margin-bottom:25px; border:1px solid #eaeaea; border-radius:8px; padding:15px;">
+  <h3 style="margin:0 0 10px 0; font-size:16px; color:#2c3e50; font-weight:500;">
+    {titel}
+  </h3>
+  <p style="margin:0; font-size:13px; color:#555;">
+    <span style="display:inline-block; background:#eef7f1; color:#27ae60; font-size:12px; padding:2px 8px; border-radius:6px; margin-bottom:6px;">
+      {change_type}
+    </span><br>
+    <b>Termin:</b> {start_datum} – {end_datum}<br>
+    <b>Ort:</b> {stadt}, {land}<br>
+    <a href="{url}" target="_blank" style="display:inline-block; margin-top:8px; font-size:13px; color:#2980b9; text-decoration:none;">
+      › Mehr Infos zu dieser Messe
+    </a>
+  </p>
 </div>
 """
 
