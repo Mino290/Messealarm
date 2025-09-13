@@ -4,7 +4,7 @@ import time
 import requests
 import smtplib
 from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -260,7 +260,8 @@ def delete_old_messen(ids: List[str]) -> None:
     BATCH = 500
     for i in range(0, len(ids), BATCH):
         batch_ids = ids[i:i + BATCH]
-        id_list = ",".join([f"'{mid}'" for mid in batch_ids])
+        # KEINE Quotes um die IDs!
+        id_list = ",".join(batch_ids)
         url = f"{SUPABASE_URL}/rest/v1/Messen?id=in.({id_list})"
         r = requests.delete(url, headers=supabase_headers(), timeout=60)
         if r.status_code not in (200, 204):
@@ -445,29 +446,111 @@ def main():
         db_rows = fetch_db_messen()
         db_index = index_by_id(db_rows)
         print(f"DB: {len(db_rows)} Messen vorhanden.")
-        
+
+        # ------------------------------
+        # TESTMODUS
+        # ------------------------------
+        TESTMODE = False        # Gesamter Testmodus an/aus
+        TEST_APPEND = False     # Neue Messe(n) und Update testen
+        TEST_DELETE = True     # Messe(n) testweise aus API entfernen
+
+        if TESTMODE:
+            print("⚡ TESTMODE aktiviert ⚡")
+
+            # ------------------------------
+            # Block 1: TEST_APPEND → Neue Messe(n) und Update testen
+            # ------------------------------
+            if TEST_APPEND:
+                print("→ TEST_APPEND aktiviert: Neue Messe(n) und Updates werden simuliert")
+
+                # Neue Messe (Insert-Test)
+                api_rows.append({
+                    "id": "TEST_NEU",
+                    "titel": "Testmesse Berlin",
+                    "stadt": "Berlin",
+                    "land": "Deutschland",
+                    "start_datum": "2025-10-01",
+                    "end_datum": "2025-10-05",
+                    "url_param": "testmesse-berlin",
+                    "kategorie": "IT",
+                    "erstellt_am": datetime.now(timezone.utc).isoformat(),
+                    "url": DETAIL_URL_FMT.format(url_param="testmesse-berlin")
+                })
+
+                # Update-Test: Titeländerung einer bestehenden Messe
+                if db_rows:
+                    db_rows[0]["titel"] = "Geänderter Titel für Test"
+
+            # ------------------------------
+            # Block 2: TEST_DELETE → Messe(n) aus API entfernen
+            # ------------------------------
+            if TEST_DELETE:
+                print("→ TEST_DELETE aktiviert: Messe(n) aus API werden testweise entfernt")
+
+                # Wähle gezielt eine bestehende Messe-ID aus der API zum Entfernen
+                # z.B. die erste Messe in api_rows, die nicht die Test-Messe ist
+                to_delete = None
+                for m in api_rows:
+                    if m["id"] != "227831":
+                        to_delete = m["id"]
+                        break
+
+                if to_delete:
+                    api_rows = [m for m in api_rows if m["id"] != to_delete]
+                    print(f"→ Testweise Messe '{to_delete}' aus API entfernt")
+
+        # ------------------------------
+        # Prüfen auf veraltete Messen
+        # ------------------------------
         print("Prüfe auf veraltete Messen...")
         api_ids = {m["id"] for m in api_rows}
         obsolete_ids = sorted(set(db_index.keys()) - api_ids)
         print(f"{len(obsolete_ids)} veraltete Messen gefunden.")
 
         deleted_changes = []
-        if obsolete_ids:
-            for mid in obsolete_ids:
-                deleted_changes.append({
-                    "type": "deleted",
-                    "messe": db_index[mid],   # Speichere gelöschte Messe-Daten
-                    "before": db_index[mid],
-                    "changed_fields": {}
-                })
-            delete_old_messen(obsolete_ids)
-        else:
+        past_ids = []
+        future_deleted_ids = []
+
+        for mid in obsolete_ids:
+            messe = db_index[mid]
+            end_datum = messe.get("end_datum")
+
+            if end_datum:
+                try:
+                    end = datetime.strptime(end_datum, "%Y-%m-%d").date()
+                    if end < date.today():
+                        past_ids.append(mid)
+                    else:
+                        deleted_changes.append({
+                            "type": "deleted",
+                            "messe": messe,
+                            "before": messe,
+                            "changed_fields": {}
+                        })
+                        future_deleted_ids.append(mid)
+                    continue
+                except Exception as e:
+                    print(f"Fehler beim Parsen von end_datum für {mid}: {e}")
+
+            # Fallback: Messe löschen, wenn kein Enddatum
+            past_ids.append(mid)
+
+        # DB-Operationen
+        if past_ids:
+            delete_old_messen(past_ids)
+            print(f"{len(past_ids)} vergangene Messen still gelöscht")
+
+        if future_deleted_ids:
+            delete_old_messen(future_deleted_ids)
+            print(f"{len(future_deleted_ids)} zukünftige Messen als abgesagt markiert und gelöscht")
+
+        if not past_ids and not future_deleted_ids:
             print("Keine veralteten Messen gefunden.")
 
         # Normale Änderungen ermitteln
         changes = diff_messen(api_rows, db_index)
 
-        # Kombinieren: normale Änderungen + gelöschte
+        # Kombinieren
         all_changes = changes + deleted_changes
         print(f"Änderungen: {len(all_changes)}")
         
@@ -494,7 +577,6 @@ def main():
             
     except Exception as e:
         print(f"Kritischer Fehler: {str(e)}")
-        # Optional: Fehler an Admin senden
 
 if __name__ == "__main__":
   main()
